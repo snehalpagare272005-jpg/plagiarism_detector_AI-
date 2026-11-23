@@ -60,7 +60,9 @@ def _load_dotenv(path):
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 name, value = line.split("=", 1)
-                os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
+                clean_name = name.strip()
+                clean_val = value.strip().strip('"').strip("'")
+                os.environ[clean_name] = clean_val
     except OSError:
         pass
 
@@ -81,6 +83,12 @@ def get_secret(name):
         typed = ""
     if typed and str(typed).strip():
         return str(typed).strip(), "entered in session (this session only)"
+
+    # Dynamically reload .env to ensure editor edits are immediately reflected
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_file):
+        _load_dotenv(env_file)
+
     value = os.getenv(name, "").strip()
     if value:
         return value, "environment variable / .env file"
@@ -2349,7 +2357,8 @@ def _tab_fix():
 
         st.divider()
         if fix_res.get("is_fallback"):
-            st.warning("⚠️ **AI unavailable - showing a template** (API key not configured or offline).")
+            notice = fix_res.get("notice") or "API key not configured or offline"
+            st.warning(f"⚠️ **AI unavailable - showing a template** ({notice}).")
         else:
             st.success(f"✨ **Powered by Gemini** ({fix_res.get('provider')})")
 

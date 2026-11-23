@@ -36,6 +36,24 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def get_env_or_secret(name: str, default: str = "") -> str:
     """Return environment variable or Streamlit secret without requiring .env."""
+    # Check .env first to dynamically pick up newly saved keys
+    env_file = os.path.join(ROOT_DIR, ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() == name:
+                        clean_v = v.strip().strip('"').strip("'")
+                        if clean_v:
+                            os.environ[name] = clean_v
+                            return clean_v
+        except OSError:
+            pass
+
     val = os.getenv(name, "").strip()
     if val:
         return val
@@ -204,18 +222,22 @@ def _translate_gemini(text: str, source_lang: str, api_key: str, model_name: Opt
             f"Preserve technical terminology, numbers, and formatting. Output ONLY the English translation without any conversational prefixes, quotes, or markdown notes.\n\n"
             f"Text to translate:\n{text}"
         )
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-            )
-        )
-        if response and response.text:
-            return response.text.strip()
+        for target_model in [model, "gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                    )
+                )
+                if response and response.text:
+                    return response.text.strip()
+            except Exception:
+                continue
+        return None
     except Exception:
         return None
-    return None
 
 
 def translate_text(text: str, source_lang_code: str = "auto", use_cache: bool = True) -> Dict[str, Any]:

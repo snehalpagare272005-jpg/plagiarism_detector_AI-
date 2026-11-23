@@ -20,6 +20,25 @@ from llm.prompts import SYSTEM_ROLE_INSTRUCTION, build_fix_prompt
 
 def get_env_or_secret(name: str, default: str = "") -> str:
     """Return environment variable or Streamlit secret without requiring .env."""
+    # Check .env first to dynamically pick up newly saved keys
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_file = os.path.join(root_dir, ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() == name:
+                        clean_v = v.strip().strip('"').strip("'")
+                        if clean_v:
+                            os.environ[name] = clean_v
+                            return clean_v
+        except OSError:
+            pass
+
     val = os.getenv(name, "").strip()
     if val:
         return val
@@ -180,53 +199,63 @@ def fix_passage(
 
     prompt = build_fix_prompt(passage, source_title, source_url)
 
-    # Attempt call with 1 JSON retry
-    raw_response = ""
-    for attempt in range(2):
-        try:
-            raw_response = call_gemini_api(prompt, active_model, api_key, temperature=0.3)
-            cleaned = _clean_json_response(raw_response)
-            parsed = json.loads(cleaned)
+    # Candidate models: active model first, followed by stable alternatives if 503/404 occurs
+    models_to_try = [active_model]
+    for alt in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+        if alt not in models_to_try:
+            models_to_try.append(alt)
 
-            explanation = parsed.get("explanation", "")
-            rewrite = parsed.get("rewrite", "")
-            citation = parsed.get("citation", "")
-            tips = parsed.get("tips", [])
+    for current_model in models_to_try:
+        raw_response = ""
+        for attempt in range(2):
+            try:
+                raw_response = call_gemini_api(prompt, current_model, api_key, temperature=0.3)
+                cleaned = _clean_json_response(raw_response)
+                parsed = json.loads(cleaned)
 
-            result = {
-                "explanation": explanation,
-                "rewrite": rewrite,
-                "suggested_rewrite": rewrite,
-                "citation": citation,
-                "citation_suggestion": citation,
-                "tips": tips if isinstance(tips, list) else [str(tips)],
-                "provider": f"Gemini API ({active_model})",
-                "is_fallback": False,
-                "cached": False
-            }
-            _FIX_CACHE[cache_key] = result
-            return result
+                explanation = parsed.get("explanation", "")
+                rewrite = parsed.get("rewrite", "")
+                citation = parsed.get("citation", "")
+                tips = parsed.get("tips", [])
 
-        except json.JSONDecodeError:
-            if attempt == 0:
-                prompt += "\nREMINDER: Return ONLY a valid JSON object. Do not wrap in markdown or include extraneous commentary."
-                continue
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "quota" in err_msg.lower():
-                user_msg = "Gemini API rate limit reached. Returning educational writing template."
-            elif "not found" in err_msg.lower() or "404" in err_msg:
-                user_msg = f"Model '{active_model}' was rejected or not found. Check GEMINI_MODEL setting."
-                print(f"[!] ERROR: Gemini API rejected model name '{active_model}': {err_msg}", file=sys.stderr)
-            elif "network" in err_msg.lower() or "connection" in err_msg.lower() or "11001" in err_msg:
-                user_msg = "Network connection unavailable. Using offline guidance template."
-            else:
-                user_msg = f"API notice ({type(e).__name__}). Using standard template."
+                result = {
+                    "explanation": explanation,
+                    "rewrite": rewrite,
+                    "suggested_rewrite": rewrite,
+                    "citation": citation,
+                    "citation_suggestion": citation,
+                    "tips": tips if isinstance(tips, list) else [str(tips)],
+                    "provider": f"Gemini API ({current_model})",
+                    "is_fallback": False,
+                    "cached": False
+                }
+                _FIX_CACHE[cache_key] = result
+                return result
 
-            fallback = _get_fallback_fix(passage, source_title, source_url)
-            fallback["notice"] = user_msg
-            _FIX_CACHE[cache_key] = fallback
-            return fallback
+            except json.JSONDecodeError:
+                if attempt == 0:
+                    prompt += "\nREMINDER: Return ONLY a valid JSON object. Do not wrap in markdown or include extraneous commentary."
+                    continue
+            except Exception as e:
+                err_msg = str(e)
+                # If high demand (503) or model unavailable/not found (404), fail over to next model
+                if ("503" in err_msg or "unavailable" in err_msg.lower() or "404" in err_msg or "not found" in err_msg.lower()) and current_model != models_to_try[-1]:
+                    break
+
+                if "429" in err_msg or "quota" in err_msg.lower():
+                    user_msg = "Gemini API rate limit reached. Returning educational writing template."
+                elif "not found" in err_msg.lower() or "404" in err_msg:
+                    user_msg = f"Model '{current_model}' was rejected or not found. Check GEMINI_MODEL setting."
+                    print(f"[!] ERROR: Gemini API rejected model name '{current_model}': {err_msg}", file=sys.stderr)
+                elif "network" in err_msg.lower() or "connection" in err_msg.lower() or "11001" in err_msg:
+                    user_msg = "Network connection unavailable. Using offline guidance template."
+                else:
+                    user_msg = f"API notice ({type(e).__name__}). Using standard template."
+
+                fallback = _get_fallback_fix(passage, source_title, source_url)
+                fallback["notice"] = user_msg
+                _FIX_CACHE[cache_key] = fallback
+                return fallback
 
     fallback = _get_fallback_fix(passage, source_title, source_url)
     _FIX_CACHE[cache_key] = fallback
